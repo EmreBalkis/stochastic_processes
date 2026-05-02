@@ -1,0 +1,281 @@
+---
+title: "İST 374 Stokastik Süreçler - Markov Zinciri Analizi"
+author: "Emre Balkış"
+date: "`r Sys.Date()`"
+output:
+  word_document:
+    toc: true
+    reference_docx: default
+    df_print: paged
+  html_document:
+    toc: true
+    df_print: paged
+  pdf_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+# Gerekli Kütüphaneler
+library(markovchain)
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+library(DiagrammeR)
+library(expm)
+library(diagram)
+```
+
+# SORU 1: 
+Gerçek hayattan en az 60 gözlem içeren bir veri kümesi seçiniz. Bu verilere dayanarak en az üç durum içeren bir stokastik süreç tanımlayınız. Bu sürece ait durum uzayını ($S$) ve zaman parametresini ($T$) açıklayınız. Kullandığınız verinin kaynağını, zaman aralığını, tanımladığınız durumları belirtiniz.
+
+**Cevap:** 
+
+**Araştırma Konusu ve Veri Seti:**
+Bu çalışmada, Amerika Birleşik Devletleri'ndeki bölgesel bir enerji iletim organizasyonu olan PJM Interconnection'ın enerji tüketimini modellemek amacıyla Kaggle platformunda yer alan "Hourly Energy Consumption" veri seti kullanılmıştır. Veri setindeki saatlik Megawatt (MW) tüketim değerleri üzerinden bir stokastik süreç tanımlanmıştır.
+
+**Zaman Parametresi ($T$):**
+Sistemin durumu (enerji tüketimi), her saat başı düzenli olarak ölçülüp kaydedilmektedir. Zaman değişkeni sürekli bir akış yerine belirli zaman adımlarıyla (saatlik periyotlarla) ifade edildiği için zaman parametresi kesiklidir ($t = 0, 1, 2, 3, \dots$ saatler). Sürecin durumlar arası geçişleri belirli zaman adımlarında gerçekleştiğinden, tanımlanan bu model **kesikli parametreli (zamanlı) bir stokastik süreçtir**.
+
+**Durum Uzayı ($S$) ve Tanımlanan Durumlar:**
+Enerji tüketimi doğası gereği sürekli bir sayısal veri olsa da, bir Markov zinciri oluşturabilmek (durum geçişlerini inceleyebilmek) adına veri kesikli hale getirilmiştir. Tüketim değerleri (MW), veri setinin dağılımına (çeyreklik dilimlere) göre üç ayrık kategoriye ayrılmıştır:
+
+**1. Düşük:** Saatlik enerji tüketiminin genel veri setinin alt %30'luk diliminde kaldığı durumlar.
+
+**2. Normal:** Saatlik enerji tüketiminin genel veri setinin orta %40'lık diliminde (beklenen ortalama civarında) seyrettiği durumlar.
+
+**3. Yüksek:** Saatlik enerji tüketiminin genel veri setinin en üst %30'luk diliminde (aşırı yüklenme vb.) olduğu durumlar.
+
+Sürecin alabileceği tüm olası durumların oluşturduğu küme sayılabilir ve sonlu olduğu için bu, **kesikli durum uzayına** sahip bir süreçtir. Buna göre durum uzayı şu şekilde tanımlanmıştır:
+
+ $S = \{\text{Düşük}, \text{Normal}, \text{Yüksek}\}$
+
+
+```{r}
+# Verinin çekilmesi
+enerji_verisi <- read.csv("C:/Users/emreb/OneDrive/olasılıksal_surecler/AEP_hourly.csv")
+
+# Durumların belirlenmesi
+esikler <- quantile(enerji_verisi$AEP_MW, probs = c(0.30, 0.70))
+enerji_verisi$Durum <- cut(
+  enerji_verisi$AEP_MW,
+  breaks = c(-Inf, esikler[1], esikler[2], Inf),
+  labels = c("Dusuk", "Normal", "Yuksek"),
+  right = TRUE
+)
+enerji_verisi$Durum <- factor(enerji_verisi$Durum, levels = c("Dusuk", "Normal", "Yuksek"))
+table(enerji_verisi$Durum)
+```
+
+## 1.a) Durum-Zaman Grafiği
+**Soru:** Tanımladığınız Markov zincirinin durum uzayı (y eksen) ve zaman parametresine (x eksen) bağlı grafiğini çiziniz. Yorumlayınız.
+
+**Cevap:**
+```{r}
+# İlk 100 gözlem üzerinden çizim (daha okunabilir olması için)
+grafik_verisi <- enerji_verisi[1:100, ]
+grafik_verisi$Zaman_Indeksi <- 1:nrow(grafik_verisi)
+
+ggplot(grafik_verisi, aes(x = Zaman_Indeksi, y = as.numeric(Durum), group=1)) +
+  geom_step(color = "steelblue", size=1) +
+  geom_point(aes(color = Durum), size = 3) +
+  scale_y_continuous(breaks = 1:3, labels = levels(grafik_verisi$Durum)) +
+  scale_color_manual(values = c("Dusuk" = "darkred", "Normal" = "orange", "Yuksek" = "darkgreen")) +
+  labs(title = "Enerji Tüketimi Durum Değişimi (İlk 100 Saat)",
+       x = "Zaman (Saat)", y = "Durum (S)") +
+  theme_minimal()
+```
+
+**Yorum:**  Grafikteki uzun yatay çizgiler sürecin yüksek bir atalete sahip olduğunu göstermektedir. Sistemin bir duruma girdiğinde orada kalma eğilimi yüksektir. Bu da, birazdan hesaplanacak olan geçiş matrisinde (P) ana köşegen üzerinde yer alan "kendi kendine geçiş" olasılıklarının (örn: $P_{Normal, Normal}$) yüksek çıkacağına işaret etmektedir.
+Durumlar arasındaki geçişlere bakıldığında, "Düşük" (kırmızı) seviyeden doğrudan "Yüksek" (yeşil) seviyeye ani bir sıçrama olmadığı görülmektedir. Sistem genellikle "Normal" (sarı) durum üzerinden geçiş yapmaktadır (Düşük $\rightarrow$ Normal $\rightarrow$ Yüksek veya Yüksek $\rightarrow$ Normal $\rightarrow$ Düşük).
+
+## 1.b) Bir-Adım Geçiş Matrisi ($P$) ve Diyagramı
+
+**Soru:** Tanımladığınız Markov zincirine ait bir-adım geçiş matrisini P oluşturunuz. Bu matrise ait geçiş diyagramını çiziniz. Bu geçiş matrisindeki en yüksek ve en düşük olasılık değerlerini yorumlayınız.
+
+**Cevap:** Bir-adım geçiş olasılığı, $m$. adımda $i$ durumunda bulunan sürecin bir adım sonra $j$ durumunda bulunması olasılığıdır ($p_{ij}^{(1)}=P(X_{m+1}=j|X_{m}=i)$) .
+
+```{r}
+mc_model <- markovchainFit(data = enerji_verisi$Durum)
+P_matrisi <- mc_model$estimate@transitionMatrix
+print(round(P_matrisi, 3))
+
+# Yazıların karmaşıklaşmaması için matrisi 2 ondalık basamağa yuvarlıyoruz.
+# plotmat() ok yönlerini sütundan satıra çizdiği için t() ile devriğini alıyoruz.
+P_cizim <- t(round(as.matrix(P_matrisi), 2))
+
+# Bir-Adım Geçiş Diyagramı Çizimi
+plotmat(P_cizim,
+        pos = c(1, 2),         # Düğümleri üçgen dizilimine sokar (1 üstte, 2 altta)
+        lwd = 1,               # Ok kalınlığı
+        box.lwd = 2,           # Düğüm çerçeve kalınlığı
+        cex.txt = 0.8,         # Ok üzerindeki yazı boyutu
+        box.size = 0.12,       # Düğüm boyutu
+        box.type = "circle",   # Düğümlerin şekli
+        box.col = "lightcyan", # Düğüm rengi
+        arr.length = 0.3,      # Ok başı uzunluğu
+        arr.width = 0.2,       # Ok başı genişliği
+        self.cex = 0.6,        # Kendi kendine dönen okların yazı boyutu
+        self.shifty = -0.05,   # Kendi kendine dönen okların dikey konumu
+        self.shiftx = 0.14,    # Kendi kendine dönen okların yatay konumu
+        main = "Bir-Adım Geçiş Diyagramı (P)")
+```
+
+**Yorum:**
+Matristeki en yüksek olasılık değerleri ana köşegen üzerinde toplanmıştır: $P_{Düşük, Düşük} = 0.886$, $P_{Normal, Normal} = 0.848$ ve $P_{Yüksek, Yüksek} = 0.909$. Bu durum, saatlik enerji tüketiminin mevcut durumunu koruma eğiliminin çok yüksek olduğunu göstermektedir.
+Matristeki en düşük olasılık değerleri uç noktalar arasındaki geçişlerde gözlemlenmektedir. Saatlik tüketim "Düşük" seviyedeyken bir sonraki saat aniden "Yüksek" seviyeye geçme olasılığı sıfırdır ($P_{Düşük, Yüksek} = 0.000$). Benzer şekilde, "Yüksek" seviyeden "Düşük" seviyeye ani düşüş olasılığı da yok denecek kadar azdır ($P_{Yüksek, Düşük} = 0.002$). Enerji tüketimi kademeli bir artış/azalış sergilemektedir.
+
+## 1.c) $P^3$ ve $P^{100}$ Geçiş Matrisleri
+
+**Soru:** Tanımladığınız Markov zincirine ait P3 ve P100 olasılık matrislerini oluşturunuz. Diyagramlarını çiziniz.
+
+**Cevap:** $n$-adım geçiş matrisi, $P$ matrisinin $n.$ kuvveti alınarak ($P^n$) hesaplanır .
+
+```{r}
+# --- P^3 MATRİSİ VE DİYAGRAMI ---
+P3 <- P_matrisi %^% 3
+cat("--- 3 Adımlık Geçiş Matrisi (P^3) ---\n")
+print(round(P3, 3))
+
+P3_cizim <- t(round(as.matrix(P3), 2))
+
+plotmat(P3_cizim,
+        pos = c(1, 2), lwd = 1, box.lwd = 2, cex.txt = 0.8, box.size = 0.12,
+        box.type = "circle", box.col = "lightcyan",
+        arr.length = 0.3, arr.width = 0.2, self.cex = 0.6,
+        self.shifty = -0.05, self.shiftx = 0.14,
+        main = "P^3 Geçiş Diyagramı")
+
+# --- P^100 MATRİSİ VE DİYAGRAMI ---
+P100 <- P_matrisi %^% 100
+cat("\n--- 100 Adımlık Geçiş Matrisi (P^100) ---\n")
+print(round(P100, 3))
+
+P100_cizim <- t(round(as.matrix(P100), 2))
+
+plotmat(P100_cizim,
+        pos = c(1, 2), lwd = 1, box.lwd = 2, cex.txt = 0.8, box.size = 0.12,
+        box.type = "circle", box.col = "lightcyan",
+        arr.length = 0.3, arr.width = 0.2, self.cex = 0.6,
+        self.shifty = -0.05, self.shiftx = 0.14,
+        main = "P^100 Geçiş Diyagramı (Denge)")
+```
+
+**Yorum:**
+
+**1. Kısa Vadeli Analiz ($P^3$ Matrisi):**
+$P^3$ matrisi, şu anki tüketim durumundan tam 3 saat sonraki duruma geçiş olasılıklarını verir. 
+
+* Bir-adım geçiş matrisinde (P) "Düşük" seviyeden "Yüksek" seviyeye geçiş olasılığı sıfır iken, 3 adım sonrasında bu olasılığın sıfırdan büyük ($P_{Düşük, Yüksek}^{(3)} = 0.021$) olduğu görülmektedir. Bu da sistemin 3 saatlik bir zaman diliminde "Normal" durumu bir köprü olarak kullanarak uç noktalar arası geçiş yapabildiğini gösterir.
+
+* Ana köşegen üzerindeki değerler (örn. 0.721, 0.650, 0.767) azalmış olsa da halen en yüksek olasılıklardır. Yani 3 saatlik kısa bir vadede sistemin başlangıç durumunun etkisi (hafızası) halen devam etmektedir.
+
+**2. Uzun Dönem Analizi ve Denge Dağılımı ($P^{100}$ Matrisi):**
+
+$P^{100}$ matrisi (100 saat sonrası) incelendiğinde, matrisin tüm satırlarının tamamen birbirine eşitlendiği görülmektedir.
+
+* **Başlangıç Durumundan Bağımsızlık (Teorem 2.1):** Adım sayısı ($n$) büyüdükçe (örneğin n=100), sürecin gelecekteki durumu, başlangıçtaki durumundan tamamen bağımsız hale gelmektedir. $P^{100}$ matrisindeki satırların eşitlenmesi, sistemin **Limit (Denge) Dağılımına** ulaştığını ispatlar.
+
+* **Tüketim Bağlamında Anlamı:** Şu anki enerji tüketimi ne olursa olsun, tam 100 saat sonra enerji tüketiminin "Düşük" olma olasılığı %30, "Normal" olma olasılığı %40 ve "Yüksek" olma olasılığı %30'dur. 
+
+
+## 1.d) İndirgenebilirlik, Kapalı Küme ve Yutucu Durum
+
+```{r}
+# Yutucu durum ve indirgenebilirlik kontrolü
+yutucu <- absorbingStates(mc_model$estimate)
+indirgenemez_mi <- is.irreducible(mc_model$estimate)
+
+cat("Yutucu Durumlar:", ifelse(length(yutucu)==0, "Yok", yutucu), "\n")
+cat("Sistem İndirgenebilir mi?:", ifelse(indirgenemez_mi, "Hayır (İndirgenemez)", "Evet"), "\n")
+```
+
+**Yorum:** Kendi kendine geçiş olasılığı 1 olan bir durum bulunmadığı için yutucu (absorbing) durum yoktur. Sistemdeki tüm durumlar birbirleriyle iletişim halindedir ve dışarı çıkılamayan bir kapalı küme (closed set) bulunmamaktadır. Bu nedenle süreç indirgenemez (irreducible) bir yapıdadır.
+
+**1. Yutucu (Absorbing) Durum Analizi:**
+Analiz sonucunda sistemde hiçbir yutucu durum bulunmadığı tespit edilmiştir. Enerji tüketimi bağlamında bu durum; sistemin asla kalıcı olarak "Düşük" veya "Yüksek" tüketim seviyesinde kilitli kalmadığını, zamanla mutlaka diğer durumlara geçiş yaptığını göstermektedir.
+
+**2. Kapalı Küme (Closed Set) ve İndirgenebilirlik:**
+Çıktıya göre zincir **İndirgenemez (Irreducible)** bir yapıdadır. Sistemdeki tüm durumlar ("Düşük", "Normal", "Yüksek") birbirleriyle iletişim halindedir. Sistemde kendi içine hapsolmuş bir alt kapalı küme yoktur.
+
+**3. Periyodik (Döngüsel) Durum:**
+Sistem kendi durumunda ardışık adımlarda kalabildiği için (bir zorunlu döngü aralığı olmadığı için) tüm durumlar **aperiyodiktir**. Enerji tüketimi, önceden kesin olarak belirlenmiş sabit saat döngülerine sahip değildir.
+
+İncelenen enerji tüketim süreci yutucu durumu, alt kapalı kümesi ve periyodik bir yapısı bulunmayan, tüm durumların birbiriyle tam iletişimde olduğu **İndirgenemez (Irreducible)** bir Markov Zinciridir.
+
+## 1.e) Denge Dağılımı 
+
+($\pi$)Sistem indirgenemezdir. Sistem uzun vadede sabit olasılıklara, yani denge dağılımına ($\pi P = \pi$) ulaşır.
+
+```{r}
+if(indirgenemez_mi) {
+  denge <- steadyStates(mc_model$estimate)
+  cat("--- Denge Dağılımı (pi) ---\n")
+  print(round(denge, 4))
+}
+```
+
+**Yorum:** Çıkan $\pi$ vektörü, aylar veya yıllar sonra rastgele seçilen herhangi bir saatte sistemin hangi durumda bulunma olasılığının ne olduğunu gösterir.
+
+
+# SORU 2.
+
+**İndirgenebilir Markov Zinciri ve Yutulma Analizi**
+
+Durum uzayı $S=\{1,2,3,4\}$ olsun. 1 ve 2 numaralı durumları geçiş (transient) durumları, 3 ve 4 numaralı durumları ise bir kez girildiğinde bir daha çıkılamayan yutucu (absorbing) durumlar ($P_{33}=1, P_{44}=1$) olarak tanımlayalım.Kanonik forma göre $P$ matrisi şu şekilde alt matrislere ayrılır:$$ P = \begin{pmatrix} Q & R \\ 0 & I \end{pmatrix} $$Örnek matrislerimiz:$$ Q = \begin{pmatrix} 0.2 & 0.3 \\ 0.1 & 0.2 \end{pmatrix}, \quad R = \begin{pmatrix} 0.4 & 0.1 \\ 0.2 & 0.5 \end{pmatrix} $$Beklenen Yutulma Süresi ve OlasılıklarıBeklenen yutulma süresi ($N$) ve yutulma olasılıkları ($F$) formülleri:$$ N = (I - Q)^{-1} $$$$ F = N \times R $$
+
+```{r}
+# Q ve R matrislerinin tanımlanması
+Q <- matrix(c(0.2, 0.3, 0.1, 0.2), nrow = 2, byrow = TRUE)
+R <- matrix(c(0.4, 0.1, 0.2, 0.5), nrow = 2, byrow = TRUE)
+I <- diag(2)
+
+# N Matrisi (Beklenen Yutulma Süresi)
+N_mat <- solve(I - Q)
+cat("--- Beklenen Yutulma Süresi Matrisi (N) ---\n")
+print(round(N_mat, 4))
+
+# F Matrisi (Yutulma Olasılıkları)
+F_mat <- N_mat %*% R
+cat("\n--- Yutulma Olasılıkları Matrisi (F) ---\n")
+print(round(F_mat, 4))
+```
+
+**Yorum:**
+
+**1. Beklenen Yutulma Süresi Matrisi (N) Yorumu:**
+
+* **1. Durumdan Başlayan Süreç (1. Satır):** Sistem 1. durumdan başlarsa, yutuluncaya kadar 1. durumda ortalama **1.3115** adım, 2. durumda ise ortalama **0.4918** adım geçirmektedir. Toplamda yutucu bir duruma ulaşana kadar geçmesi beklenen ortalama süre $1.3115 + 0.4918 =$ **1.8033** adımdır.
+
+* **2. Durumdan Başlayan Süreç (2. Satır):** Sistem 2. durumdan başlarsa, yutuluncaya kadar 1. durumda ortalama **0.1639** adım, 2. durumda ise ortalama **1.3115** adım geçirmektedir. Toplamda yutucu bir duruma ulaşana kadar geçmesi beklenen ortalama süre $0.1639 + 1.3115 =$ **1.4754** adımdır.
+
+*(Çıkarım: 1. durumdan başlayan bir sürecin yutucu bir duruma ulaşıp sonlanması, 2. durumdan başlayan bir sürece kıyasla ortalama olarak daha uzun sürmektedir.)*
+
+**2. Yutulma Olasılıkları Matrisi (F) Yorumu:**
+
+* **1. Durumdan Başlayan Süreç (1. Satır):** 1. durumdan başlayan sürecin nihayetinde 3. durumda yutulma olasılığı **%62.30** ($0.6230$), 4. durumda yutulma olasılığı ise **%37.70** ($0.3770$) olarak hesaplanmıştır.
+
+* **2. Durumdan Başlayan Süreç (2. Satır):** 2. durumdan başlayan sürecin nihayetinde 3. durumda yutulma olasılığı **%32.79** ($0.3279$), 4. durumda yutulma olasılığı ise **%67.21** ($0.6721$) olarak hesaplanmıştır.
+
+*(Çıkarım: Sistemin hangi yutucu durumda sonlanacağı büyük ölçüde başlangıç durumuna bağlıdır. 1. durumdan başlayan sistem çoğunlukla 3. duruma çekilirken, 2. durumdan başlayan sistem baskın bir şekilde 4. duruma yönelmektedir.)*
+
+# Kaynakça
+
+**1. Veri Seti:**
+
+* Robikscube. (2018). *Hourly Energy Consumption (PJM Interconnection)*. Kaggle. Erişim adresi: https://www.kaggle.com/datasets/robikscube/hourly-energy-consumption
+
+**2. Ders Notları ve Teorik Kaynaklar:**
+
+* Kadılar, G. *İST 374 Olasılıksal Süreçler: Ders 1 - Olasılıksal Süreçler ve Temel Tanımlar*.
+
+* Kadılar, G. *İST 374 Olasılıksal Süreçler: Ders 2 - Markov Süreci ve Markov Zincirleri*.
+
+* Kadılar, G. *İST 374 Olasılıksal Süreçler: Ders 3 - Markov Zincirinde Durumların Sınıflandırılması*.
+
+* Kadılar, G. *İST 374 Olasılıksal Süreçler: Ders 4 - İndirgenebilir Markov Zincirleri*.
+
